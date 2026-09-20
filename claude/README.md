@@ -37,6 +37,7 @@ Session: a5363bfe-1234-5678-abcd-ef0123456789
 | **Dir**                     | Current working directory                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | **Quota**                   | Claude Max subscription quota — 5-hour window and 7-day window usage % (Anthropic models only)                                                                                                                                                                                                                                                                                                                                                                      |
 | **DeepSeek**                | Today's API cost (CNY), token usage (input cache miss/hit, output, total), cache hit rate % (deepseek models only)                                                                                                                                                                                                                                                                                                                                                  |
+| **StepFun**                 | Today's credit burn and call count, subscription plan's remaining % and absolute credit left, next reset date (step models only)                                                                                                                                                                                                                                                                                                                                               |
 | **Current**                 | Session cumulative tokens (in/out), cache read/write, equivalent API cost, session duration, lines added/removed                                                                                                                                                                                                                                                                                                                                                    |
 | **Project**                 | All-time token usage for the current project directory                                                                                                                                                                                                                                                                                                                                                                                                              |
 | **Today**                   | Token usage across all projects today (CST timezone)                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -183,6 +184,50 @@ The statusline calls `deepseek status --json` with a 2-second timeout. If the CL
 
 ---
 
+## StepFun Integration
+
+When using step models (any model whose display name contains `step`, e.g. `step-5-preview`), the statusline automatically detects the model and replaces the Quota line with today's StepFun credit burn and the subscription plan's remaining allowance.
+
+### Requirements
+
+Install [stepfun-cli](https://github.com/Zephyruston/stepfun-cli) and authenticate once:
+
+```bash
+# Install from source (Rust ≥1.85)
+git clone https://github.com/Zephyruston/stepfun-cli.git
+cd stepfun-cli
+cargo install --path . --locked
+
+# Authenticate
+stepfun login
+```
+
+No token file to manage — `stepfun` stores its own credentials, so the statusline works unattended after login. The session it stores is short-lived and the CLI re-authenticates on its own, which is why the statusline simply shells out to it rather than handling credentials itself.
+
+The statusline calls `stepfun credit --json` and `stepfun usage --json --start <today> --end <today>` (Beijing calendar day) in parallel, each with a 5-second timeout. The CLI retries internally, so a single attempt is enough on this side. If the CLI is unavailable or the model is not a step model, it silently falls back to the standard Quota line.
+
+Rendered line:
+
+```text
+StepFun: today 9.26M credit (87 calls)  |  plan: 99.4% left (1.59B/1.6B)  |  resets 2026-10-20
+```
+
+If `credit` succeeds but `usage` does not, the today segment shows `-` rather than a misleading zero. When no data comes back at all, the line states why: `(run 'stepfun login')` if the CLI is installed but returned nothing (usually not logged in), `(stepfun CLI not found)` if it is not on `PATH`.
+
+### Fields displayed
+
+| Field                  | Source                                        |
+| ---------------------- | --------------------------------------------- |
+| today's credit burn    | `usage.rows[].credit` (summed, today CST)     |
+| today's call count     | `usage.rows[].calls` (summed)                 |
+| plan remaining %       | `credit.subscription_left_rate`               |
+| credit left / total    | `credit.buckets[0].left` / `.total`           |
+| next reset date        | `credit.reset_at`                             |
+
+The remaining percentage is color-coded: green ≥ 60%, yellow ≥ 25%, red below.
+
+---
+
 ## Performance
 
 Token stats (Project / Today / Total) are cached in `~/.claude/statusline-tok-cache.json` and auto-invalidated when new session files appear.
@@ -191,6 +236,8 @@ Token stats (Project / Today / Total) are cached in `~/.claude/statusline-tok-ca
 | ----------------- | --------- |
 | Warm cache        | ~200ms    |
 | Cold / cache miss | ~600ms–2s |
+
+On step models the two `stepfun` calls run in parallel with a 5-second timeout each, so a slow CLI adds latency but never blocks the statusline beyond that ceiling. On DeepSeek models the single `deepseek status --json` call has a 2-second timeout.
 
 ---
 

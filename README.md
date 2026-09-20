@@ -12,7 +12,7 @@ English | [简体中文](#简体中文)
 | --- | --- | --- |
 | Script | `claude/statusline.sh` (macOS / Linux), `claude/statusline.ps1` (Windows) | `pi/statusline.sh` (macOS / Linux) |
 | Extra dependency | none — Claude Code runs statusline commands natively | **the `pi-statusline` extension** — pi cannot render a statusline on its own |
-| Lines shown | Motto, Git, Model, Dir, Quota/DeepSeek, Current/Project/Today/Total tokens, Session, peak/valley, Date/Time | Motto, Git, Model, Quota/DeepSeek, Session, peak/valley, Date/Time |
+| Lines shown | Motto, Git, Model, Dir, Quota/DeepSeek/StepFun, Current/Project/Today/Total tokens, Session, peak/valley, Date/Time | Motto, Git, Model, Quota/DeepSeek/StepFun, Session, peak/valley, Date/Time |
 | Install | type `install` in Claude Code | `pi install npm:pi-statusline` + settings block |
 
 The pi script is Claude-Code-compatible: it consumes the same JSON payload shape, so an existing Claude Code statusline command usually works under pi with little or no modification.
@@ -55,6 +55,18 @@ Both statuslines detect DeepSeek models and replace the quota line with today's 
 
 Without the CLI, everything else still works — the DeepSeek line simply degrades.
 
+## StepFun Integration
+
+Both statuslines detect step models (anything whose display name contains `step`) and replace the quota line with today's StepFun credit burn and the subscription plan's remaining allowance, sourced from the optional [stepfun-cli](https://github.com/Zephyruston/stepfun-cli) (`stepfun login` once, then it works unattended). The line looks like this:
+
+```text
+StepFun: today 9.26M credit (87 calls)  |  plan: 99.4% left (1.59B/1.6B)  |  resets 2026-10-20
+```
+
+The credit bucket percentage is color-coded: green at 60% and above, yellow at 25%, red below. The two CLI calls (`credit` and `usage`) run in parallel with a 5-second timeout each — the CLI retries internally, so a slow or missing one never blocks the statusline beyond that ceiling. If `credit` succeeds but `usage` does not, the today segment shows `-` instead of a misleading zero.
+
+When no data comes back at all, the line says so with a hint about why: `StepFun: -  (run 'stepfun login')` when the CLI is installed but could not return data (usually not logged in), and `StepFun: -  (stepfun CLI not found)` when it is not on `PATH`.
+
 ## License
 
 MIT
@@ -75,7 +87,7 @@ For English, see [above](#agents-statusline).
 | --- | --- | --- |
 | 脚本 | `claude/statusline.sh`（macOS / Linux）、`claude/statusline.ps1`（Windows） | `pi/statusline.sh`（macOS / Linux） |
 | 额外依赖 | 无 —— Claude Code 原生支持 statusline 命令 | **`pi-statusline` 扩展** —— pi 本身没有状态栏能力 |
-| 显示行 | Motto、Git、Model、Dir、Quota/DeepSeek、Current/Project/Today/Total token、Session、峰谷、Date/Time | Motto、Git、Model、Quota/DeepSeek、Session、峰谷、Date/Time |
+| 显示行 | Motto、Git、Model、Dir、Quota/DeepSeek/StepFun、Current/Project/Today/Total token、Session、峰谷、Date/Time | Motto、Git、Model、Quota/DeepSeek/StepFun、Session、峰谷、Date/Time |
 | 安装方式 | 在 Claude Code 里输入 `install` | `pi install npm:pi-statusline` + 配置块 |
 
 pi 版脚本兼容 Claude Code：消费同样结构的 JSON payload，所以已有的 Claude Code statusline 命令通常可以直接在 pi 下复用，或只需极少修改。
@@ -117,6 +129,18 @@ cd agents-statusline
 两份状态栏都会识别 DeepSeek 模型，并把配额行替换为当日花费、token 用量和缓存命中率，数据来自可选的 [deepseek-cli](https://github.com/Zephyruston/deepseek-cli)。同时渲染 DeepSeek 计价时段的峰谷时钟 —— 北京时间工作日 09:00–12:00 与 14:00–18:00 为 ⛰ 梁文峰时间（全价），其余时间为 🌊 梁文谷时间（半价）。
 
 没装该 CLI 也不影响其他功能，只是 DeepSeek 行降级。
+
+## StepFun 集成
+
+两份状态栏都会识别 step 模型（display_name 中包含 `step` 即命中），并把配额行替换为当日 StepFun credit 用量与订阅套餐剩余额度，数据来自可选的 [stepfun-cli](https://github.com/Zephyruston/stepfun-cli)（先 `stepfun login` 登录一次，之后无需交互）。该行形如：
+
+```text
+StepFun: today 9.26M credit (87 calls)  |  plan: 99.4% left (1.59B/1.6B)  |  resets 2026-10-20
+```
+
+剩余比例按阈值着色：60% 以上为绿色，25% 以上为黄色，低于 25% 为红色。`credit` 与 `usage` 两个请求并行执行，各自 5 秒超时 —— CLI 内部会自行重试，所以这一层不需要再包一层；CLI 慢或缺失最多阻塞状态栏这么久。若 `credit` 成功而 `usage` 失败，当日那段显示 `-` 而不是误导性的 0。
+
+完全拿不到数据时，该行会说明原因：CLI 已安装但取不到数据（通常是没登录）显示 `StepFun: -  (run 'stepfun login')`；CLI 不在 `PATH` 上则显示 `StepFun: -  (stepfun CLI not found)`。
 
 ## License
 

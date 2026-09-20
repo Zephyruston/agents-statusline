@@ -9,8 +9,9 @@ try {
     $d = @{}
 }
 
-# Helper: format token count as k/M
+# Helper: format token count as k/M/B
 function Format-Tok([long]$n) {
+    if ($n -ge 1000000000) { return "$([math]::Round($n/1000000000,2))B" }
     if ($n -ge 1000000) { return "$([math]::Round($n/1000000,1))M" }
     if ($n -ge 1000)    { return "$([math]::Round($n/1000,1))k" }
     return "$n"
@@ -71,6 +72,28 @@ try {
         $dsOutput = deepseek status --json 2>$null
         if ($LASTEXITCODE -eq 0 -and $dsOutput) {
             $dsJson = $dsOutput
+        }
+    }
+} catch {}
+
+# --- StepFun status (only for step* models) ---
+# The CLI retries internally, so one attempt per call is enough.
+$isStep = $false
+$sfMissing = $false
+$sfCreditJson = '{}'
+$sfUsageJson  = '{}'
+try {
+    $modelName = if ($d.model -and $d.model.display_name) { $d.model.display_name } else { '' }
+    if ($modelName -match 'step') {
+        $isStep = $true
+        if (-not (Get-Command stepfun -ErrorAction SilentlyContinue)) {
+            $sfMissing = $true
+        } else {
+            $sfToday = ([System.DateTime]::UtcNow.AddHours(8)).ToString('yyyy-MM-dd')
+            $sfCreditOut = stepfun credit --json 2>$null
+            if ($LASTEXITCODE -eq 0 -and $sfCreditOut) { $sfCreditJson = ($sfCreditOut -join "`n") }
+            $sfUsageOut = stepfun usage --json --start $sfToday --end $sfToday 2>$null
+            if ($LASTEXITCODE -eq 0 -and $sfUsageOut) { $sfUsageJson = ($sfUsageOut -join "`n") }
         }
     }
 } catch {}
@@ -194,6 +217,54 @@ if ($isDeepseek -and $dsJson -ne '{}') {
             "out:$cyan$(Format-Tok $dsOut)$reset)  |  " +
             "hit_rate:$magenta$([math]::Round($dsRate*100,1))%$reset"
     } catch {}
+}
+
+# --- StepFun status ---
+$stepfunLine = ''
+if ($isStep) {
+    try {
+        $sfCr = ConvertFrom-Json $sfCreditJson
+        if ($sfCr -and ($sfCr.subscription_left_rate -ne $null -or $sfCr.buckets)) {
+            $sfBucket = $null
+            if ($sfCr.buckets -and $sfCr.buckets.Count -gt 0) { $sfBucket = $sfCr.buckets[0] }
+            $sfLeft  = if ($sfBucket -and $sfBucket.left)  { [double]$sfBucket.left }  else { 0.0 }
+            $sfTotal = if ($sfBucket -and $sfBucket.total) { [double]$sfBucket.total } else { 0.0 }
+            $sfRate  = if ($sfCr.subscription_left_rate) { [double]$sfCr.subscription_left_rate * 100 } else { 0.0 }
+            $sfTodayC = 0.0
+            $sfTodayN = 0
+            $sfUsageOk = $false
+            if ($sfUsageJson -ne '{}') {
+                try {
+                    $sfUs = ConvertFrom-Json $sfUsageJson
+                    if ($sfUs -and $sfUs.rows) {
+                        $sfUsageOk = $true
+                        foreach ($r in $sfUs.rows) {
+                            if ($r.credit) { $sfTodayC += [double]$r.credit }
+                            if ($r.calls)  { $sfTodayN += [long]$r.calls }
+                        }
+                    }
+                } catch {}
+            }
+            if ($sfRate -ge 60) { $sfColor = $green } elseif ($sfRate -ge 25) { $sfColor = $yellow } else { $sfColor = $red }
+            $sfLeftStr = if ($sfTotal -gt 0) { " ($cyan$(Format-Tok ([long]$sfLeft))$reset/$(Format-Tok ([long]$sfTotal)))" } else { '' }
+            $sfReset = ''
+            if ($sfCr.reset_at) {
+                $sfRt = [System.DateTimeOffset]::FromUnixTimeSeconds([long]$sfCr.reset_at).ToOffset([System.TimeSpan]::FromHours(8))
+                $sfReset = "resets $($sfRt.ToString('yyyy-MM-dd'))"
+            }
+            $sfTodayStr = if ($sfUsageOk) { "today $yellow$(Format-Tok ([long]$sfTodayC)) credit$reset ($cyan$sfTodayN calls$reset)" } else { 'today -' }
+            $sfParts = @(
+                $sfTodayStr,
+                "plan: $sfColor$([math]::Round($sfRate,1))% left$reset$sfLeftStr"
+            )
+            if ($sfReset) { $sfParts += $sfReset }
+            $stepfunLine = 'StepFun: ' + ($sfParts -join '  |  ')
+        }
+    } catch {}
+    if (-not $stepfunLine) {
+        $sfHint = if ($sfMissing) { '(stepfun CLI not found)' } else { "(run 'stepfun login')" }
+        $stepfunLine = "StepFun: -  $dim$sfHint$reset"
+    }
 }
 
 # --- Project / Today / Total tokens (with file-mtime cache) ---
@@ -411,8 +482,10 @@ if ($mottoLine) { Write-Output $mottoLine }
 Write-Output $gitLine
 Write-Output $modelLine
 Write-Output $dirLine
-# Line 4: DeepSeek (for deepseek models) or Quota (for Anthropic models)
-if ($isDeepseek) {
+# Line 4: StepFun (for step* models), DeepSeek (for deepseek models) or Quota (for Anthropic models)
+if ($isStep) {
+    Write-Output $stepfunLine
+} elseif ($isDeepseek) {
     Write-Output $deepseekLine
 } else {
     Write-Output $quotaLine

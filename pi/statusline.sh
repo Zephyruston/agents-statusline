@@ -39,6 +39,9 @@ def fmt(n):
         n = float(n or 0)
     except Exception:
         n = 0.0
+    if n >= 1_000_000_000:
+        v = round(n / 1_000_000_000, 2)
+        return f"{v:g}B"
     if n >= 1_000_000:
         v = round(n / 1_000_000, 1)
         return f"{v:g}M"
@@ -195,10 +198,69 @@ else:
         f"\033[1;93m⛰ 梁文峰时间(full price)\033[0m"
     )
 
+# ── StepFun status (step* models) ─────────────────────────────────────────────
+sf_cr_raw = sys.argv[4] if len(sys.argv) > 4 else '{}'
+sf_us_raw = sys.argv[5] if len(sys.argv) > 5 else '{}'
+sf_missing = (sys.argv[6] if len(sys.argv) > 6 else "0") == "1"
+is_step = "step" in model_name
+
+def _sf_load(raw):
+    try:
+        v = json.loads(raw)
+    except Exception:
+        return {}
+    return v if isinstance(v, dict) else {}
+
+stepfun_line = ""
+if is_step:
+    sf_cr = _sf_load(sf_cr_raw)
+    sf_us = _sf_load(sf_us_raw)
+    if sf_cr:
+        sf_buckets = sf_cr.get("buckets") or []
+        sf_b0      = sf_buckets[0] if sf_buckets and isinstance(sf_buckets[0], dict) else {}
+        sf_left    = float(sf_b0.get("left")  or 0)
+        sf_total   = float(sf_b0.get("total") or 0)
+        sf_rate    = float(sf_cr.get("subscription_left_rate") or 0) * 100
+        sf_rows    = sf_us.get("rows")
+        if isinstance(sf_rows, list):
+            sf_today_c = 0.0
+            sf_today_n = 0
+            for _r in sf_rows:
+                if isinstance(_r, dict):
+                    sf_today_c += float(_r.get("credit") or 0)
+                    sf_today_n += int(_r.get("calls") or 0)
+            sf_today_str = (
+                f"today \033[33m{fmt(sf_today_c)} credit\033[0m "
+                f"(\033[36m{sf_today_n} calls\033[0m)"
+            )
+        else:
+            sf_today_str = "today -"
+        if sf_rate >= 60:
+            sf_color = "\033[32m"               # green
+        elif sf_rate >= 25:
+            sf_color = "\033[33m"               # yellow
+        else:
+            sf_color = "\033[31m"               # red
+        sf_left_str = f" (\033[36m{fmt(sf_left)}\033[0m/{fmt(sf_total)})" if sf_total else ""
+        sf_parts = [
+            sf_today_str,
+            f"plan: {sf_color}{sf_rate:.1f}% left\033[0m{sf_left_str}",
+        ]
+        sf_reset_at = sf_cr.get("reset_at")
+        if sf_reset_at:
+            sf_rt = datetime.fromtimestamp(int(sf_reset_at), timezone(timedelta(hours=8)))
+            sf_parts.append(f"resets {sf_rt.strftime('%Y-%m-%d')}")
+        stepfun_line = "StepFun: " + "  |  ".join(sf_parts)
+    else:
+        sf_hint = "(stepfun CLI not found)" if sf_missing else "(run 'stepfun login')"
+        stepfun_line = f"StepFun: -  \033[2m{sf_hint}\033[0m"
+
 # ── print lines ───────────────────────────────────────────────────────────────
 # Git line is printed by bash; the rest come from here.
 print("__MODEL__"   + model_line)
-if is_deepseek:
+if is_step:
+    print("__STEPFUN__" + stepfun_line)
+elif is_deepseek:
     print("__DEEPSEEK__" + deepseek_line)
 else:
     print("__QUOTA__"   + quota_line)
@@ -260,9 +322,35 @@ git_line="Git [$branch]  M:$git_modified  D:$git_deleted  S:$git_staged  U:$git_
 
 # ── DeepSeek status (only for deepseek models) ────────────────────────────────
 ds_json='{}'
-model_name=$(echo "$json" | jq -r '.model.display_name // ""' 2>/dev/null)
+model_name=$(echo "$json" | jq -r '.model.display_name // ""' 2>/dev/null | tr '[:upper:]' '[:lower:]')
 if [[ "$model_name" == *[Dd][Ee][Ee][Pp][Ss][Ee][Ee][Kk]* ]]; then
     ds_json=$(timeout 2 deepseek status --json 2>/dev/null || echo '{}')
+fi
+
+# ── StepFun status (only for step* models) ────────────────────────────────────
+# credit  = plan/subscription allowance left; usage = today's credit burn (CST day).
+# The CLI retries internally, so one attempt per call is enough.
+sf_credit='{}'; sf_usage='{}'; sf_missing=0
+if [[ "$model_name" == *[Ss][Tt][Ee][Pp]* ]]; then
+    if ! command -v stepfun >/dev/null 2>&1; then
+        sf_missing=1
+    else
+        sf_today=$(TZ=Asia/Shanghai date +%F 2>/dev/null)
+        sf_tmp=$(mktemp -d)
+        trap 'rm -rf "$sf_tmp"' EXIT
+        ( timeout 5 stepfun credit --json >"$sf_tmp/credit.json" 2>/dev/null || echo '{}' >"$sf_tmp/credit.json" ) &
+        sf_pid_cr=$!
+        ( timeout 5 stepfun usage --json --start "$sf_today" --end "$sf_today" >"$sf_tmp/usage.json" 2>/dev/null || echo '{}' >"$sf_tmp/usage.json" ) &
+        sf_pid_us=$!
+        wait "$sf_pid_cr" "$sf_pid_us" 2>/dev/null
+        sf_credit=$(cat "$sf_tmp/credit.json" 2>/dev/null)
+        sf_usage=$(cat "$sf_tmp/usage.json" 2>/dev/null)
+        [ -n "$sf_credit" ] || sf_credit='{}'
+        [ -n "$sf_usage" ]  || sf_usage='{}'
+        rm -rf "$sf_tmp"
+        trap - EXIT
+        unset sf_today sf_tmp sf_pid_cr sf_pid_us
+    fi
 fi
 
 # ── pi version (resolve pi's package.json, no node spawn) ─────────────────────
@@ -291,7 +379,7 @@ fi
 unset _pi_bin _pi_target _pi_dir
 
 # ── Run python for everything else ────────────────────────────────────────────
-py_out=$(python3 -c "$_py_main" "$json" "$ds_json" "$pi_version" 2>/dev/null)
+py_out=$(python3 -c "$_py_main" "$json" "$ds_json" "$pi_version" "$sf_credit" "$sf_usage" "$sf_missing" 2>/dev/null)
 
 # ── Extract lines by prefix and strip prefix ─────────────────────────────────
 _line() { grep "^__${1}__" <<< "$py_out" | sed "s/^__${1}__//"; }
@@ -302,12 +390,17 @@ if [ -n "$motto_line" ]; then
 fi
 printf '%s\n' "$git_line"
 _line MODEL
-# Line 4: DeepSeek (for deepseek models) or Quota (for Anthropic models)
-ds_line=$(_line DEEPSEEK)
-if [ -n "$ds_line" ]; then
-    printf '%s\n' "$ds_line"
+# Line 4: StepFun (for step* models), DeepSeek (for deepseek models) or Quota (for Anthropic models)
+sf_line=$(_line STEPFUN)
+if [ -n "$sf_line" ]; then
+    printf '%s\n' "$sf_line"
 else
-    _line QUOTA
+    ds_line=$(_line DEEPSEEK)
+    if [ -n "$ds_line" ]; then
+        printf '%s\n' "$ds_line"
+    else
+        _line QUOTA
+    fi
 fi
 _line SESSION
 _line PV
