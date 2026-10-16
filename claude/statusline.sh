@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Claude Code Statusline — macOS / Linux
-# Reads session JSON from stdin, outputs an 11-line statusline (+ optional motto).
+# Reads session JSON from stdin, outputs an 11-line statusline (+ optional
+# motto). Two sections take a second line, because Claude Code truncates a
+# statusline line where it should wrap it: StepFun always, and Current when the
+# session has a duration or line changes.
 # Requires: bash, python3 (stdlib only), git
 
 set -o pipefail
@@ -116,10 +119,16 @@ token_line = (
     f"Current: in:{fmt(ses_in)}  out:{fmt(ses_out)}  "
     f"rcache:{fmt(ses_cr)}  wcache:{fmt(ses_cw)}  |  Cost: ${round(ses_cost,3)}"
 )
+# Claude Code truncates a statusline line where it should wrap it, so the
+# session's optional extras go on a second line, aligned under `Current:`.
+token_line2 = ""
+ses_extras = []
 if dur_str:
-    token_line += f"  |  duration: {dur_str}"
+    ses_extras.append(f"Duration: {dur_str}")
 if ses_added > 0 or ses_removed > 0:
-    token_line += f"  Changes: +{ses_added}/-{ses_removed}"
+    ses_extras.append(f"Changes: +{ses_added}/-{ses_removed}")
+if ses_extras:
+    token_line2 = "         " + "  |  ".join(ses_extras)
 
 # ── quota (Anthropic) ──────────────────────────────────────────────────────────
 q5h_raw = jget(d, "rate_limits", "five_hour",  "used_percentage")
@@ -217,6 +226,7 @@ def _sf_load(raw):
     return v if isinstance(v, dict) else {}
 
 stepfun_line = ""
+stepfun_line2 = ""
 if is_step:
     sf_cr = _sf_load(sf_cr_raw)
     sf_us = _sf_load(sf_us_raw)
@@ -226,20 +236,35 @@ if is_step:
         sf_left    = float(sf_b0.get("left")  or 0)
         sf_total   = float(sf_b0.get("total") or 0)
         sf_rate    = float(sf_cr.get("subscription_left_rate") or 0) * 100
-        sf_rows    = sf_us.get("rows")
+        # Today's tokens, summed over every model row.
+        sf_rows = sf_us.get("rows")
+        sf_in = sf_out = sf_cached = sf_calls = 0
         if isinstance(sf_rows, list):
-            sf_today_c = 0.0
-            sf_today_n = 0
             for _r in sf_rows:
                 if isinstance(_r, dict):
-                    sf_today_c += float(_r.get("credit") or 0)
-                    sf_today_n += int(_r.get("calls") or 0)
-            sf_today_str = (
-                f"today \033[33m{fmt(sf_today_c)} credit\033[0m "
-                f"(\033[36m{sf_today_n} calls\033[0m)"
+                    sf_in     += int(_r.get("input_tokens")  or 0)
+                    sf_out    += int(_r.get("output_tokens") or 0)
+                    sf_cached += int(_r.get("cached_tokens") or 0)
+                    sf_calls  += int(_r.get("calls") or 0)
+        # Cached share of the reported input tokens. Whether `in_amount` already
+        # includes `cache_amount` is unconfirmed upstream (see stepfun-cli's
+        # docs/protocol.md), so this is the ratio of the two reported numbers —
+        # a value above 100% would mean the platform excludes the cached ones.
+        sf_hit = f" (\033[35m{sf_cached / sf_in * 100:.1f}%\033[0m)" if sf_in else ""
+        sf_head = []
+        if sf_in or sf_out or sf_cached:
+            sf_head.append(
+                f"today in:\033[36m{fmt(sf_in)}\033[0m  "
+                f"out:\033[36m{fmt(sf_out)}\033[0m  "
+                f"cache:\033[36m{fmt(sf_cached)}\033[0m{sf_hit}"
             )
+            sf_head.append(f"{sf_calls} calls")
+        elif sf_calls:
+            # Deep-search rows report no token counts at all, so a day made of
+            # nothing but those would otherwise print three zeroes.
+            sf_head.append(f"today {sf_calls} calls")
         else:
-            sf_today_str = "today -"
+            sf_head.append("today -")
         if sf_rate >= 60:
             sf_color = "\033[32m"               # green
         elif sf_rate >= 25:
@@ -247,15 +272,16 @@ if is_step:
         else:
             sf_color = "\033[31m"               # red
         sf_left_str = f" (\033[36m{fmt(sf_left)}\033[0m/{fmt(sf_total)})" if sf_total else ""
-        sf_parts = [
-            sf_today_str,
-            f"plan: {sf_color}{sf_rate:.1f}% left\033[0m{sf_left_str}",
-        ]
+        sf_tail = [f"{sf_color}{sf_rate:.1f}% left\033[0m{sf_left_str}"]
         sf_reset_at = sf_cr.get("reset_at")
         if sf_reset_at:
             sf_rt = datetime.fromtimestamp(int(sf_reset_at), timezone(timedelta(hours=8)))
-            sf_parts.append(f"resets {sf_rt.strftime('%Y-%m-%d')}")
-        stepfun_line = "StepFun: " + "  |  ".join(sf_parts)
+            sf_tail.append(f"resets {sf_rt.strftime('%m-%d')}")
+        # Claude Code truncates a statusline line where it should wrap it (pi
+        # wraps), so the section is split over two lines: today's tokens above,
+        # the plan's credit allowance below.
+        stepfun_line  = "StepFun: " + "  |  ".join(sf_head)
+        stepfun_line2 = "plan:    " + "  |  ".join(sf_tail)
     else:
         sf_hint = "(stepfun CLI not found)" if sf_missing else "(run 'stepfun login')"
         stepfun_line = f"StepFun: -  \033[2m{sf_hint}\033[0m"
@@ -465,11 +491,15 @@ print("__MODEL__"   + model_line)
 print("__DIR__"     + dir_line)
 if is_step:
     print("__STEPFUN__" + stepfun_line)
+    if stepfun_line2:
+        print("__STEPFUN__" + stepfun_line2)
 elif is_deepseek:
     print("__DEEPSEEK__" + deepseek_line)
 else:
     print("__QUOTA__"   + quota_line)
 print("__CURRENT__" + token_line)
+if token_line2:
+    print("__CURRENT__" + token_line2)
 print("__PROJ__"    + proj_line)
 print("__TODAY__"   + today_line)
 print("__TOTAL__"   + total_line)
@@ -537,7 +567,8 @@ if [[ "$model_name" == *[Dd][Ee][Ee][Pp][Ss][Ee][Ee][Kk]* ]]; then
 fi
 
 # ── StepFun status (only for step* models) ────────────────────────────────────
-# credit  = plan/subscription allowance left; usage = today's credit burn (CST day).
+# credit = plan/subscription allowance left; usage = today's per-model token
+# totals (input / output / cached) and call count, on the CST calendar day.
 # The CLI retries internally, so one attempt per call is enough.
 sf_credit='{}'; sf_usage='{}'; sf_missing=0
 if [[ "$model_name" == *[Ss][Tt][Ee][Pp]* ]]; then
@@ -575,7 +606,7 @@ fi
 printf '%s\n' "$git_line"
 _line MODEL
 _line DIR
-# Line 4: StepFun (for step* models), DeepSeek (for deepseek models) or Quota (for Anthropic models)
+# Lines 4-5: StepFun (for step* models, two lines), else DeepSeek or Quota (one line)
 sf_line=$(_line STEPFUN)
 if [ -n "$sf_line" ]; then
     printf '%s\n' "$sf_line"

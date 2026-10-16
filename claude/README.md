@@ -37,8 +37,8 @@ Session: a5363bfe-1234-5678-abcd-ef0123456789
 | **Dir**                     | Current working directory                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | **Quota**                   | Claude Max subscription quota — 5-hour window and 7-day window usage % (Anthropic models only)                                                                                                                                                                                                                                                                                                                                                                      |
 | **DeepSeek**                | Today's API cost (CNY), token usage (input cache miss/hit, output, total), cache hit rate % (deepseek models only)                                                                                                                                                                                                                                                                                                                                                  |
-| **StepFun**                 | Today's credit burn and call count, subscription plan's remaining % and absolute credit left, next reset date (step models only)                                                                                                                                                                                                                                                                                                                                               |
-| **Current**                 | Session cumulative tokens (in/out), cache read/write, equivalent API cost, session duration, lines added/removed                                                                                                                                                                                                                                                                                                                                                    |
+| **StepFun**                 | Two lines: today's token usage (input/output/cached + cache hit rate) and call count, then the subscription plan's remaining % and absolute credit left, next reset date (step models only)                                                                                                                                                                                                                                                                                                                                               |
+| **Current**                 | Two lines: session cumulative tokens (in/out), cache read/write and equivalent API cost, then session duration and lines added/removed                                                                                                                                                                                                                                                                                                                                                    |
 | **Project**                 | All-time token usage for the current project directory                                                                                                                                                                                                                                                                                                                                                                                                              |
 | **Today**                   | Token usage across all projects today (CST timezone)                                                                                                                                                                                                                                                                                                                                                                                                                |
 | **Total**                   | All-time token usage across all projects and all time                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -186,7 +186,7 @@ The statusline calls `deepseek status --json` with a 2-second timeout. If the CL
 
 ## StepFun Integration
 
-When using step models (any model whose display name contains `step`, e.g. `step-5-preview`), the statusline automatically detects the model and replaces the Quota line with today's StepFun credit burn and the subscription plan's remaining allowance.
+When using step models (any model whose display name contains `step`, e.g. `step-5-preview`), the statusline automatically detects the model and replaces the Quota line with today's StepFun token usage and the subscription plan's remaining allowance.
 
 ### Requirements
 
@@ -206,25 +206,31 @@ No token file to manage — `stepfun` stores its own credentials, so the statusl
 
 The statusline calls `stepfun credit --json` and `stepfun usage --json --start <today> --end <today>` (Beijing calendar day) in parallel, each with a 5-second timeout. The CLI retries internally, so a single attempt is enough on this side. If the CLI is unavailable or the model is not a step model, it silently falls back to the standard Quota line.
 
-Rendered line:
+Rendered lines (the section spans two — Claude Code truncates a statusline line where it should wrap it, so the tokens and the plan allowance each get their own):
 
 ```text
-StepFun: today 9.26M credit (87 calls)  |  plan: 99.4% left (1.59B/1.6B)  |  resets 2026-10-20
+StepFun: today in:8.1M  out:56k  cache:8M (98.0%)  |  73 calls
+plan:    55.8% left (892M/1.6B)  |  resets 10-20
 ```
 
-If `credit` succeeds but `usage` does not, the today segment shows `-` rather than a misleading zero. When no data comes back at all, the line states why: `(run 'stepfun login')` if the CLI is installed but returned nothing (usually not logged in), `(stepfun CLI not found)` if it is not on `PATH`.
+If `credit` succeeds but `usage` does not, the today segment shows `-` rather than a misleading zero. A day whose rows carry calls but no token counts at all (deep-search records) shows just the call count instead of three zeroes. When no data comes back at all, the line states why: `(run 'stepfun login')` if the CLI is installed but returned nothing (usually not logged in), `(stepfun CLI not found)` if it is not on `PATH`.
 
 ### Fields displayed
 
 | Field                  | Source                                        |
 | ---------------------- | --------------------------------------------- |
-| today's credit burn    | `usage.rows[].credit` (summed, today CST)     |
+| today's input tokens   | `usage.rows[].input_tokens` (summed, today CST) |
+| today's output tokens  | `usage.rows[].output_tokens` (summed)         |
+| today's cached tokens  | `usage.rows[].cached_tokens` (summed)         |
+| cache hit rate         | `cached_tokens / input_tokens` (see note)     |
 | today's call count     | `usage.rows[].calls` (summed)                 |
 | plan remaining %       | `credit.subscription_left_rate`               |
 | credit left / total    | `credit.buckets[0].left` / `.total`           |
-| next reset date        | `credit.reset_at`                             |
+| next reset date        | `credit.reset_at` (month-day, CST)            |
 
-The remaining percentage is color-coded: green ≥ 60%, yellow ≥ 25%, red below.
+The remaining percentage is color-coded: green ≥ 60%, yellow ≥ 25%, red below. The cache hit rate is magenta, matching the DeepSeek line's.
+
+> **On the hit rate:** whether `in_amount` already includes `cache_amount` is unconfirmed upstream (see `docs/protocol.md` in stepfun-cli), so the figure is simply `cached / input` — the ratio of the two reported numbers, not a billing-grade rate. Measured against a live account it sits just under 100%, which is what you would expect if the cached tokens are already counted inside the input figure. A value above 100% would mean the opposite, and is worth reporting upstream rather than "fixing" here.
 
 ---
 

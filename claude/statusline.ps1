@@ -9,6 +9,17 @@ try {
     $d = @{}
 }
 
+# ANSI colors — defined before their first consumer. The motto line below used
+# `$reset` while it was still undefined, so its gold background was never reset
+# and bled into every line printed after it.
+$reset   = [char]0x1B + '[0m'
+$dim     = [char]0x1B + '[2m'
+$red     = [char]0x1B + '[31m'
+$green   = [char]0x1B + '[32m'
+$yellow  = [char]0x1B + '[33m'
+$magenta = [char]0x1B + '[35m'
+$cyan    = [char]0x1B + '[36m'
+
 # Helper: format token count as k/M/B
 function Format-Tok([long]$n) {
     if ($n -ge 1000000000) { return "$([math]::Round($n/1000000000,2))B" }
@@ -25,8 +36,6 @@ $mottoFile = $claudeDir + '/statusline-motto.txt'
 if (Test-Path $mottoFile) {
     $mottoText = (Get-Content $mottoFile -First 1).Trim()
     if ($mottoText) {
-        $bold    = [char]0x1B + '[1m'
-        $dim     = [char]0x1B + '[2m'
         $bgGold  = [char]0x1B + '[103m'
         $black   = [char]0x1B + '[30m'
         $mottoLine = "${dim}${black}${bgGold} `u{2726} $mottoText ${reset}"
@@ -127,15 +136,6 @@ if ($d.context_window -and $null -ne $d.context_window.used_percentage -and $d.c
     } else { $ctxPct = 0 }
 }
 
-# ANSI colors
-$reset   = [char]0x1B + '[0m'
-$dim     = [char]0x1B + '[2m'
-$red     = [char]0x1B + '[31m'
-$green   = [char]0x1B + '[32m'
-$yellow  = [char]0x1B + '[33m'
-$magenta = [char]0x1B + '[35m'
-$cyan    = [char]0x1B + '[36m'
-
 # Context bar
 $barW = 10
 $filled = [math]::Max(0, [math]::Min($barW, [math]::Round($ctxPct / 100 * $barW)))
@@ -180,9 +180,14 @@ if ($sesDurMs -gt 0) {
 }
 $tokenLine = "Current: in:$(Format-Tok $sesIn)  out:$(Format-Tok $sesOut)  " +
              [char]0x2191 + "cache:$(Format-Tok $sesCR)  " +
-             [char]0x270E + "cache:$(Format-Tok $sesCW)  |  Cost: `$$([math]::Round($sesCost,3))" +
-             $(if ($sesDurStr) { "  |  $sesDurStr" } else { "" }) +
-             $(if ($sesAdded -gt 0 -or $sesRemoved -gt 0) { "  +$sesAdded/-$sesRemoved" } else { "" })
+             [char]0x270E + "cache:$(Format-Tok $sesCW)  |  Cost: `$$([math]::Round($sesCost,3))"
+# Claude Code truncates a statusline line where it should wrap it, so the
+# session's optional extras go on a second line, aligned under `Current:`.
+$tokenLine2 = ''
+$sesExtras = @()
+if ($sesDurStr) { $sesExtras += "Duration: $sesDurStr" }
+if ($sesAdded -gt 0 -or $sesRemoved -gt 0) { $sesExtras += "Changes: +$sesAdded/-$sesRemoved" }
+if ($sesExtras.Count -gt 0) { $tokenLine2 = (' ' * 9) + ($sesExtras -join '  |  ') }
 
 # --- Rate limits / Quota ---
 $quota5h = '?'; $quota7d = '?'
@@ -221,6 +226,7 @@ if ($isDeepseek -and $dsJson -ne '{}') {
 
 # --- StepFun status ---
 $stepfunLine = ''
+$stepfunLine2 = ''
 if ($isStep) {
     try {
         $sfCr = ConvertFrom-Json $sfCreditJson
@@ -230,35 +236,48 @@ if ($isStep) {
             $sfLeft  = if ($sfBucket -and $sfBucket.left)  { [double]$sfBucket.left }  else { 0.0 }
             $sfTotal = if ($sfBucket -and $sfBucket.total) { [double]$sfBucket.total } else { 0.0 }
             $sfRate  = if ($sfCr.subscription_left_rate) { [double]$sfCr.subscription_left_rate * 100 } else { 0.0 }
-            $sfTodayC = 0.0
-            $sfTodayN = 0
-            $sfUsageOk = $false
+            # Today's tokens, summed over every model row.
+            $sfIn = [long]0; $sfOut = [long]0; $sfCached = [long]0; $sfCalls = [long]0
             if ($sfUsageJson -ne '{}') {
                 try {
                     $sfUs = ConvertFrom-Json $sfUsageJson
                     if ($sfUs -and $sfUs.rows) {
-                        $sfUsageOk = $true
                         foreach ($r in $sfUs.rows) {
-                            if ($r.credit) { $sfTodayC += [double]$r.credit }
-                            if ($r.calls)  { $sfTodayN += [long]$r.calls }
+                            if ($r.input_tokens)  { $sfIn     += [long]$r.input_tokens }
+                            if ($r.output_tokens) { $sfOut    += [long]$r.output_tokens }
+                            if ($r.cached_tokens) { $sfCached += [long]$r.cached_tokens }
+                            if ($r.calls)         { $sfCalls  += [long]$r.calls }
                         }
                     }
                 } catch {}
             }
+            # Cached share of the reported input tokens. Whether `in_amount` already
+            # includes `cache_amount` is unconfirmed upstream (see stepfun-cli's
+            # docs/protocol.md), so this is the ratio of the two reported numbers.
+            $sfHit = if ($sfIn -gt 0) { " ($magenta$([math]::Round($sfCached / $sfIn * 100, 1))%$reset)" } else { '' }
+            $sfHead = @()
+            if ($sfIn -gt 0 -or $sfOut -gt 0 -or $sfCached -gt 0) {
+                $sfHead += "today in:$cyan$(Format-Tok $sfIn)$reset  out:$cyan$(Format-Tok $sfOut)$reset  cache:$cyan$(Format-Tok $sfCached)$reset$sfHit"
+                $sfHead += "$sfCalls calls"
+            } elseif ($sfCalls -gt 0) {
+                # Deep-search rows report no token counts at all, so a day made of
+                # nothing but those would otherwise print three zeroes.
+                $sfHead += "today $sfCalls calls"
+            } else {
+                $sfHead += 'today -'
+            }
             if ($sfRate -ge 60) { $sfColor = $green } elseif ($sfRate -ge 25) { $sfColor = $yellow } else { $sfColor = $red }
             $sfLeftStr = if ($sfTotal -gt 0) { " ($cyan$(Format-Tok ([long]$sfLeft))$reset/$(Format-Tok ([long]$sfTotal)))" } else { '' }
-            $sfReset = ''
+            $sfTail = @("$sfColor$([math]::Round($sfRate,1))% left$reset$sfLeftStr")
             if ($sfCr.reset_at) {
                 $sfRt = [System.DateTimeOffset]::FromUnixTimeSeconds([long]$sfCr.reset_at).ToOffset([System.TimeSpan]::FromHours(8))
-                $sfReset = "resets $($sfRt.ToString('yyyy-MM-dd'))"
+                $sfTail += "resets $($sfRt.ToString('MM-dd'))"
             }
-            $sfTodayStr = if ($sfUsageOk) { "today $yellow$(Format-Tok ([long]$sfTodayC)) credit$reset ($cyan$sfTodayN calls$reset)" } else { 'today -' }
-            $sfParts = @(
-                $sfTodayStr,
-                "plan: $sfColor$([math]::Round($sfRate,1))% left$reset$sfLeftStr"
-            )
-            if ($sfReset) { $sfParts += $sfReset }
-            $stepfunLine = 'StepFun: ' + ($sfParts -join '  |  ')
+            # Claude Code truncates a statusline line where it should wrap it, so the
+            # section is split over two lines: today's tokens above, the plan's credit
+            # allowance below.
+            $stepfunLine  = 'StepFun: ' + ($sfHead -join '  |  ')
+            $stepfunLine2 = 'plan:    ' + ($sfTail -join '  |  ')
         }
     } catch {}
     if (-not $stepfunLine) {
@@ -482,15 +501,17 @@ if ($mottoLine) { Write-Output $mottoLine }
 Write-Output $gitLine
 Write-Output $modelLine
 Write-Output $dirLine
-# Line 4: StepFun (for step* models), DeepSeek (for deepseek models) or Quota (for Anthropic models)
+# Lines 4-5: StepFun (for step* models, two lines), else DeepSeek or Quota (one line)
 if ($isStep) {
     Write-Output $stepfunLine
+    if ($stepfunLine2) { Write-Output $stepfunLine2 }
 } elseif ($isDeepseek) {
     Write-Output $deepseekLine
 } else {
     Write-Output $quotaLine
 }
 Write-Output $tokenLine
+if ($tokenLine2) { Write-Output $tokenLine2 }
 Write-Output $projLine
 Write-Output $todayLine
 Write-Output $totalLine

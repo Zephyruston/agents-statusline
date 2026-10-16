@@ -32,7 +32,7 @@ Session: 01a08cf6-78cb-7629-9a3e-cef3e2d0e852
 | **Git** | Branch name, modified/deleted/staged/untracked files, ahead/behind/diverged/conflicts vs remote |
 | **Model** | Active model name and context window usage bar + % |
 | **DeepSeek** | Today's API cost (CNY), token usage (input cache miss/hit, output, total), cache hit rate % (deepseek models only) |
-| **StepFun** | Today's credit burn and call count, subscription plan's remaining % and absolute credit left, next reset date (step models only) |
+| **StepFun** | Two lines: today's token usage (input/output/cached + cache hit rate) and call count, then the subscription plan's remaining % and absolute credit left, next reset date (step models only) |
 | **Quota** | 5-hour and 7-day window usage % (replaces the DeepSeek/StepFun line for other models) |
 | **Session** | pi session id, taken from the payload, `PI_SESSION_ID`, or the session file name |
 | **LiangWenFeng/LiangWenGu** | Peak/valley clock for DeepSeek's pricing schedule, as a pun on DeepSeek's founder: Beijing workdays 09:00–12:00 & 14:00–18:00 are ⛰ 梁文峰时间 ("peak", full price), everything else is 🌊 梁文谷时间 ("valley", half price), plus a countdown to the next switch |
@@ -204,7 +204,7 @@ The statusline calls `deepseek status --json` with a 2-second timeout. If the CL
 
 ## StepFun Integration
 
-When using step models (any model whose display name contains `step`, e.g. `step-5-preview`), the statusline automatically detects the model and replaces the Quota line with today's StepFun credit burn and the subscription plan's remaining allowance.
+When using step models (any model whose display name contains `step`, e.g. `step-5-preview`), the statusline automatically detects the model and replaces the Quota line with today's StepFun token usage and the subscription plan's remaining allowance.
 
 ### Requirements
 
@@ -224,25 +224,31 @@ No token file to manage — `stepfun` stores its own credentials, so the statusl
 
 The statusline calls `stepfun credit --json` and `stepfun usage --json --start <today> --end <today>` (Beijing calendar day), each with a 5-second timeout. The CLI retries internally, so a single attempt is enough on this side. If the CLI is unavailable or the model is not a step model, it silently falls back to the Quota line.
 
-Rendered line:
+Rendered lines (the section spans two — Claude Code truncates a statusline line where it should wrap it, so the script emits the tokens and the plan allowance as separate lines rather than relying on the host to wrap them):
 
 ```text
-StepFun: today 9.26M credit (87 calls)  |  plan: 99.4% left (1.59B/1.6B)  |  resets 2026-10-20
+StepFun: today in:8.1M  out:56k  cache:8M (98.0%)  |  73 calls
+plan:    55.8% left (892M/1.6B)  |  resets 10-20
 ```
 
-If `credit` succeeds but `usage` does not, the today segment shows `-` rather than a misleading zero. When no data comes back at all, the line states why: `(run 'stepfun login')` if the CLI is installed but returned nothing (usually not logged in), `(stepfun CLI not found)` if it is not on `PATH`.
+If `credit` succeeds but `usage` does not, the today segment shows `-` rather than a misleading zero. A day whose rows carry calls but no token counts at all (deep-search records) shows just the call count instead of three zeroes. When no data comes back at all, the line states why: `(run 'stepfun login')` if the CLI is installed but returned nothing (usually not logged in), `(stepfun CLI not found)` if it is not on `PATH`.
 
 ### Fields displayed
 
 | Field | Source |
 | --- | --- |
-| today's credit burn | `usage.rows[].credit` (summed, today CST) |
+| today's input tokens | `usage.rows[].input_tokens` (summed, today CST) |
+| today's output tokens | `usage.rows[].output_tokens` (summed) |
+| today's cached tokens | `usage.rows[].cached_tokens` (summed) |
+| cache hit rate | `cached_tokens / input_tokens` (see note) |
 | today's call count | `usage.rows[].calls` (summed) |
 | plan remaining % | `credit.subscription_left_rate` |
 | credit left / total | `credit.buckets[0].left` / `.total` |
-| next reset date | `credit.reset_at` |
+| next reset date | `credit.reset_at` (month-day, CST) |
 
-The remaining percentage is color-coded: green ≥ 60%, yellow ≥ 25%, red below.
+The remaining percentage is color-coded: green ≥ 60%, yellow ≥ 25%, red below. The cache hit rate is magenta, matching the DeepSeek line's.
+
+> **On the hit rate:** whether `in_amount` already includes `cache_amount` is unconfirmed upstream (see `docs/protocol.md` in stepfun-cli), so the figure is simply `cached / input` — the ratio of the two reported numbers, not a billing-grade rate. Measured against a live account it sits just under 100%, which is what you would expect if the cached tokens are already counted inside the input figure. A value above 100% would mean the opposite, and is worth reporting upstream rather than "fixing" here.
 
 ---
 

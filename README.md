@@ -57,15 +57,32 @@ Without the CLI, everything else still works — the DeepSeek line simply degrad
 
 ## StepFun Integration
 
-Both statuslines detect step models (anything whose display name contains `step`) and replace the quota line with today's StepFun credit burn and the subscription plan's remaining allowance, sourced from the optional [stepfun-cli](https://github.com/Zephyruston/stepfun-cli) (`stepfun login` once, then it works unattended). The line looks like this:
+Both statuslines detect step models (anything whose display name contains `step`) and replace the quota line with today's StepFun token usage and the subscription plan's remaining allowance, sourced from the optional [stepfun-cli](https://github.com/Zephyruston/stepfun-cli) (`stepfun login` once, then it works unattended). Claude Code truncates a statusline line where it should wrap it, so the section spans two lines:
 
 ```text
-StepFun: today 9.26M credit (87 calls)  |  plan: 99.4% left (1.59B/1.6B)  |  resets 2026-10-20
+StepFun: today in:8.1M  out:56k  cache:8M (98.0%)  |  73 calls
+plan:    55.8% left (892M/1.6B)  |  resets 10-20
 ```
 
-The credit bucket percentage is color-coded: green at 60% and above, yellow at 25%, red below. The two CLI calls (`credit` and `usage`) run in parallel with a 5-second timeout each — the CLI retries internally, so a slow or missing one never blocks the statusline beyond that ceiling. If `credit` succeeds but `usage` does not, the today segment shows `-` instead of a misleading zero.
+The credit bucket percentage is color-coded: green at 60% and above, yellow at 25%, red below; the cache hit rate is magenta, like the DeepSeek line's. The two CLI calls (`credit` and `usage`) run in parallel with a 5-second timeout each — the CLI retries internally, so a slow or missing one never blocks the statusline beyond that ceiling. If `credit` succeeds but `usage` does not, the today segment shows `-` instead of a misleading zero.
+
+Input, output and cached tokens are summed across every model row. The percentage beside the cached figure is `cached / input` — whether `in_amount` already includes `cache_amount` is unconfirmed upstream, so it is a ratio of the two reported numbers rather than a billing-grade hit rate.
 
 When no data comes back at all, the line says so with a hint about why: `StepFun: -  (run 'stepfun login')` when the CLI is installed but could not return data (usually not logged in), and `StepFun: -  (stepfun CLI not found)` when it is not on `PATH`.
+
+## Why some sections take two lines
+
+Claude Code truncates a statusline line where it should wrap it, so a long line simply loses its tail on a narrow terminal (pi wraps, so it never has the problem). Two sections are therefore emitted as a pair of lines rather than one long one:
+
+```text
+StepFun: today in:8.1M  out:56k  cache:8M (98.0%)  |  73 calls      ← always, on step models
+plan:    55.8% left (892M/1.6B)  |  resets 10-20
+
+Current: in:12.4M  out:890k  rcache:180M  wcache:4.2M  |  Cost: $8.42  ← once the session has
+         Duration: 5h23m  |  Changes: +3421/-890                      a duration or line changes
+```
+
+Both second lines are omitted when they would be empty, so a fresh session still shows the plain 11-line layout. Both the bash and the PowerShell port (`claude/statusline.ps1`) emit these pairs; the PowerShell port labels its cache columns with `↑cache:` / `✎cache:` glyphs instead of `rcache:` / `wcache:`.
 
 ## License
 
@@ -132,15 +149,32 @@ cd agents-statusline
 
 ## StepFun 集成
 
-两份状态栏都会识别 step 模型（display_name 中包含 `step` 即命中），并把配额行替换为当日 StepFun credit 用量与订阅套餐剩余额度，数据来自可选的 [stepfun-cli](https://github.com/Zephyruston/stepfun-cli)（先 `stepfun login` 登录一次，之后无需交互）。该行形如：
+两份状态栏都会识别 step 模型（display_name 中包含 `step` 即命中），并把配额行替换为当日 StepFun token 用量与订阅套餐剩余额度，数据来自可选的 [stepfun-cli](https://github.com/Zephyruston/stepfun-cli)（先 `stepfun login` 登录一次，之后无需交互）。Claude Code 的 statusline 是截断而不换行的，所以这一段占两行：
 
 ```text
-StepFun: today 9.26M credit (87 calls)  |  plan: 99.4% left (1.59B/1.6B)  |  resets 2026-10-20
+StepFun: today in:8.1M  out:56k  cache:8M (98.0%)  |  73 calls
+plan:    55.8% left (892M/1.6B)  |  resets 10-20
 ```
 
-剩余比例按阈值着色：60% 以上为绿色，25% 以上为黄色，低于 25% 为红色。`credit` 与 `usage` 两个请求并行执行，各自 5 秒超时 —— CLI 内部会自行重试，所以这一层不需要再包一层；CLI 慢或缺失最多阻塞状态栏这么久。若 `credit` 成功而 `usage` 失败，当日那段显示 `-` 而不是误导性的 0。
+剩余比例按阈值着色：60% 以上为绿色，25% 以上为黄色，低于 25% 为红色；缓存命中率为洋红色，与 DeepSeek 行一致。`credit` 与 `usage` 两个请求并行执行，各自 5 秒超时 —— CLI 内部会自行重试，所以这一层不需要再包一层；CLI 慢或缺失最多阻塞状态栏这么久。若 `credit` 成功而 `usage` 失败，当日那段显示 `-` 而不是误导性的 0。
+
+输入、输出、缓存三列 token 是对当日各模型行求和的结果。缓存数字旁的百分比是 `cached / input` —— 上游未确认 `in_amount` 是否已包含 `cache_amount`，所以它只是两个上报数字的比值，不是计费意义上的命中率。
 
 完全拿不到数据时，该行会说明原因：CLI 已安装但取不到数据（通常是没登录）显示 `StepFun: -  (run 'stepfun login')`；CLI 不在 `PATH` 上则显示 `StepFun: -  (stepfun CLI not found)`。
+
+## 为什么有些段占两行
+
+Claude Code 的 statusline 是截断而不换行的，所以长行在窄终端里会被直接切掉尾部（pi 会正常换行，没有这个问题）。以下两段因此拆成两行输出，而不是挤成一行：
+
+```text
+StepFun: today in:8.1M  out:56k  cache:8M (98.0%)  |  73 calls      ← step 模型下总是两行
+plan:    55.8% left (892M/1.6B)  |  resets 10-20
+
+Current: in:12.4M  out:890k  rcache:180M  wcache:4.2M  |  Cost: $8.42  ← 会话产生时长或
+         Duration: 5h23m  |  Changes: +3421/-890                      代码增删后才出现第二行
+```
+
+第二行为空时不会输出，所以新会话仍然是朴素的 11 行布局。bash 版与 PowerShell 版（`claude/statusline.ps1`）都会这样拆分；PowerShell 版的缓存列用 `↑cache:` / `✎cache:` 字形，而不是 `rcache:` / `wcache:`。
 
 ## License
 
